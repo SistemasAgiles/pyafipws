@@ -1,0 +1,6 @@
+﻿;!@Install@!UTF-8!
+Title="PyAfipWs 1.24b"
+BeginPrompt="¿Desea instalar la Interface Para Servicios Web de AFIP?"
+RunProgram="INSTALAR.BAT %%T"
+Directory=".\\DIST\\" 
+;!@InstallEnd@!
