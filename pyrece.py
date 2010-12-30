@@ -15,7 +15,7 @@
 __author__ = "Mariano Reingart (mariano@nsis.com.ar)"
 __copyright__ = "Copyright (C) 2009 Mariano Reingart"
 __license__ = "GPL 3.0"
-__version__ = "1.19b"
+__version__ = "1.19d"
 
 import csv
 from decimal import Decimal
@@ -25,7 +25,7 @@ import wx
 from PythonCard import dialog, model
 import traceback
 from ConfigParser import SafeConfigParser
-import wsaa,wsfe
+import wsaa, wsfe, wsfev1
 from php import SimpleXMLElement, SoapClient, SoapFault, date
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
@@ -35,7 +35,7 @@ from smtplib import SMTP
 from PyFPDF.ejemplos.form import Form
 
 HOMO = False
-DEBUG = False
+DEBUG = True
 CONFIG_FILE = "rece.ini"
 
 def digito_verificador_modulo10(codigo):
@@ -63,9 +63,8 @@ class PyRece(model.Background):
         self.items = []
         self.paths = [entrada]
         self.token = self.sign = ""
-        self.client = SoapClient(wsfe_url, action=wsfe.SOAP_ACTION, namespace=wsfe.SOAP_NS,
-                                trace=False, exceptions=True)
         self.smtp = None
+        self.webservice = None
         self.cargar()
     
     def set_cols(self, cols):
@@ -103,7 +102,9 @@ class PyRece(model.Background):
     paths = property(get_paths, set_paths)
         
     def log(self, msg):
-        self.components.txtEstado.text = msg.decode("latin1","ignore") + u"\n" + self.components.txtEstado.text.decode("latin1", "ignore")
+        if not isinstance(msg, unicode):
+            msg = msg.decode("latin1","ignore")
+        self.components.txtEstado.text = msg + u"\n" + self.components.txtEstado.text
         wx.SafeYield()
     
     def progreso(self, value):
@@ -113,7 +114,7 @@ class PyRece(model.Background):
 
     def error(self, code, text):
         ex = traceback.format_exception( sys.exc_type, sys.exc_value, sys.exc_traceback)
-        self.log(''.join(ex))
+        self.log(u''.join(ex))
         dialog.alertDialog(self, text, 'Error %s' % code)
 
     def on_btnMarcarTodo_mouseClick(self, event):
@@ -152,8 +153,12 @@ class PyRece(model.Background):
         ptovta = result.text
 
         try:
-            ultcmp = wsfe.recuperar_last_cmp(self.client, self.token, self.sign, 
-                cuit, ptovta, tipocbte)
+            if self.webservice=="wsfe":
+                ultcmp = wsfe.recuperar_last_cmp(self.client, self.token, self.sign, 
+                    cuit, ptovta, tipocbte)
+            elif  self.webservice=="wsfev1":
+                ultcmp = "wsfev1 %s" % self.ws.CompUltimoAutorizado(tipocbte, ptovta) 
+                    
             dialog.alertDialog(self, u"Último comprobante: %s\n" 
                 u"Tipo: %s (%s)\nPunto de Venta: %s" % (ultcmp, tipos[tipocbte], 
                     tipocbte, ptovta), u'Consulta Último Nro. Comprobante')
@@ -211,11 +216,41 @@ Para solicitar soporte comercial, escriba a pyafipws@nsis.com.ar
     def on_btnLimpiar_mouseClick(self, event):
         self.components.txtEstado.text = ""
 
+    def on_cboWebservice_select(self, event):
+        self.webservice = self.components.cboWebservice.stringSelection
+        self.ws = None
+        self.token = None
+        self.sign = None
+        
+        if self.webservice == "wsfe":
+            self.client = SoapClient(wsfe_url, action=wsfe.SOAP_ACTION, namespace=wsfe.SOAP_NS,
+                        trace=False, exceptions=True)
+        elif self.webservice == "wsfev1":
+            self.ws = wsfev1.WSFEv1()
+            self.ws.Conectar("","file:///C:/pyrece/wsfev1_wsdl.xml")
+            self.ws.Cuit = cuit
+            self.log("Conectado WSFEv1!")
+
+
     def on_btnAutenticar_mouseClick(self, event):
         try:
-            self.log("Creando TRA...")
-            tra = wsaa.create_tra()
-            self.log("Frimando TRA (CMS)...")
+
+            if self.webservice in ('wsfe', ):
+                service = "wsfe"
+            elif self.webservice in ('wsfev1', ):
+                self.log("Conectando WSFEv1...")
+                self.ws.Conectar("","file:///C:/pyrece/wsfev1_wsdl.xml")
+                self.ws.Cuit = cuit
+                service = "wsfe"
+            elif self.webservice in ('wsfex', ):
+                service = "wsfex"
+            else:
+                dialog.alertDialog(self, 'Debe seleccionar servicio web!', 'Advertencia')
+                return
+
+            self.log("Creando TRA %s ..." % service)
+            tra = wsaa.create_tra(service)
+            self.log("Frimando TRA (CMS) con %s %s..." % (str(cert),str(privatekey)))
             cms = wsaa.sign_tra(str(tra),str(cert),str(privatekey))
             self.log("Llamando a WSAA...")
             xml = wsaa.call_wsaa(str(cms),wsaa_url)
@@ -225,6 +260,11 @@ Para solicitar soporte comercial, escriba a pyafipws@nsis.com.ar
             self.sign = str(ta.credentials.sign)
             self.log("Token: %s" % self.token)
             self.log("Sign: %s" % self.sign)
+
+            if self.webservice == "wsfev1":
+                self.ws.Token = self.token
+                self.ws.Sign = self.sign
+
             dialog.alertDialog(self, 'Autenticado OK!', 'Advertencia')
         except SoapFault,e:
             self.error(e.faultcode, e.faultstring.encode("ascii","ignore"))
@@ -243,24 +283,34 @@ Para solicitar soporte comercial, escriba a pyafipws@nsis.com.ar
         
     def cargar(self):
         try:
-            items = []
-            for fn in self.paths:
-                csv_reader = csv.reader(open(fn), dialect='excel', delimiter=";")
+        items = []
+        for fn in self.paths:
+            if fn.endswith(".csv"):
+                csvfile = open(fn, "rb")
+                # deducir dialecto y delimitador
+                dialect = csv.Sniffer().sniff(csvfile.read(256), delimiters=[';',','])
+                csvfile.seek(0)
+                csv_reader = csv.reader(csvfile, dialect)
                 for row in csv_reader:
                     items.append(row)
-            if len(items) < 2:
-                dialog.alertDialog(self, 'El archivo no tiene datos válidos', 'Advertencia')
-            cols = [str(it).strip() for it in items[0]]
-            # armar diccionario por cada linea
-            items = [dict([(cols[i],str(v).strip()) for i,v in enumerate(item)]) for item in items[1:]]
-            self.cols = cols
-            self.items = items
+            elif fn.endswith(".xml"):
+                import formato_xml
+                regs = formato_xml.leer(fn)
+                items.extend(formato_xml.aplanar(regs))
+        if len(items) < 2:
+            dialog.alertDialog(self, 'El archivo no tiene datos válidos', 'Advertencia')
+        cols = [str(it).strip() for it in items[0]]
+        print "Cols",cols
+        # armar diccionario por cada linea
+        items = [dict([(cols[i],str(v).strip()) for i,v in enumerate(item)]) for item in items[1:]]
+        self.cols = cols
+        self.items = items
         except Exception,e:
                 self.error(u'Excepción',unicode(e))
 
     def on_btnGrabar_mouseClick(self, event):
         try:
-            wildcard = "Archivos CSV (*.csv)|*.csv"
+            wildcard = "Archivos CSV (*.csv)|*.csv|Archivos XML (*.xml)|*.xml"
             if self.paths:
                 path = self.paths[0]
             else:
@@ -270,11 +320,16 @@ Para solicitar soporte comercial, escriba a pyafipws@nsis.com.ar
             if not result.accepted:
                 return
             fn = result.paths[0]
-            f = open(fn,"wb")
-            csv_writer = csv.writer(f, dialect='excel', delimiter=";")
-            csv_writer.writerows([self.cols])
-            csv_writer.writerows([[item[k] for k in self.cols] for item in self.items])
-            f.close()
+            if fn.endswith(".csv"):
+                f = open(fn,"wb")
+                csv_writer = csv.writer(f, dialect='excel', delimiter=";")
+                csv_writer.writerows([self.cols])
+                csv_writer.writerows([[item[k] for k in self.cols] for item in self.items])
+                f.close()
+            else:
+                import formato_xml
+                regs = formato_xml.desaplanar([self.cols] + [[item[k] for k in self.cols] for item in self.items])
+                formato_xml.escribir(regs, fn)                
             dialog.alertDialog(self, u'Se guardó con éxito el archivo:\n%s' % (unicode(fn),), 'Guardar')
         except Exception, e:
             self.error(u'Excepción',unicode(e))
@@ -290,21 +345,87 @@ Para solicitar soporte comercial, escriba a pyafipws@nsis.com.ar
             for i, kargs in self.get_selected_items():
                 selected.append(i)
                 kargs['cbt_desde'] = kargs['cbt_hasta'] = kargs ['cbt_numero']
-                if 'id' not in kargs or kargs['id'] == "":
-                    id = long(kargs['cbt_desde'])
-                    id += (int(kargs['tipo_cbte'])*10**4 + int(kargs['punto_vta']))*10**8
-                    kargs['id'] = id
                 for key in kargs:
                     if isinstance(kargs[key], basestring):
                         kargs[key] = kargs[key].replace(",",".")
-                if DEBUG:
-                    self.log('\n'.join(["%s='%s'" % (k,v) for k,v in kargs.items()]))
-                ret = wsfe.aut(self.client, self.token, self.sign, cuit, **kargs)
-                kargs.update(ret)
-                del kargs['cbt_desde'] 
-                del kargs['cbt_hasta']
+                if self.webservice == 'wsfe':
+                    if 'id' not in kargs or kargs['id'] == "":
+                        id = long(kargs['cbt_desde'])
+                        id += (int(kargs['tipo_cbte'])*10**4 + int(kargs['punto_vta']))*10**8
+                        kargs['id'] = id
+                    if DEBUG:
+                        self.log('\n'.join(["%s='%s'" % (k,v) for k,v in kargs.items()]))
+                    ret = wsfe.aut(self.client, self.token, self.sign, cuit, **kargs)
+                    kargs.update(ret)
+                    del kargs['cbt_desde'] 
+                    del kargs['cbt_hasta']
+                elif self.webservice == 'wsfev1':
+                    encabezado = {}
+                    for k in ('concepto', 'tipo_doc', 'nro_doc', 'tipo_cbte', 'punto_vta',
+                              'cbt_desde', 'cbt_hasta', 'imp_total', 'imp_tot_conc', 'imp_neto',
+                              'imp_iva', 'imp_trib', 'imp_op_ex', 'fecha_cbte', 
+                              'moneda_id', 'moneda_ctz'):
+                        encabezado[k] = kargs[k]
+                            
+                    for k in ('fecha_venc_pago', 'fecha_serv_desde', 'fecha_serv_hasta'):
+                        if k in kargs:
+                            encabezado[k] = kargs.get(k)
+                        
+                    self.ws.CrearFactura(**encabezado)
+                    
+                    for l in range(1,1000):
+                        k = 'tributo_%%s_%s' % l
+                        if (k % 'id') in kargs:
+                            id = kargs[k % 'id']
+                            desc = kargs[k % 'desc']
+                            base_imp = kargs[k % 'base_imp']
+                            alic = kargs[k % 'alic']
+                            importe = kargs[k % 'importe']
+                            if id:
+                                self.ws.AgregarTributo(id, desc, base_imp, alic, importe)
+                        else:
+                            break
+
+                    for l in range(1,1000):
+                        k = 'iva_%%s_%s' % l
+                        if (k % 'id') in kargs:
+                            id = kargs[k % 'id']
+                            base_imp = kargs[k % 'base_imp']
+                            importe = kargs[k % 'importe']
+                            if id:
+                                self.ws.AgregarIva(id, base_imp, importe)
+                        else:
+                            break
+                        
+                    for l in range(1,1000):
+                        k = 'cbte_asoc_%%s_%s' % l
+                        if (k % 'tipo') in kargs:
+                            tipo = kargs[k % 'tipo']
+                            pto_vta = kargs[k % 'pto_vta']
+                            nro = kargs[k % 'nro']
+                            if id:
+                                self.ws.AgregarCmpAsoc(tipo, pto_vta, nro)
+                        else:
+                            break
+                
+                    if DEBUG or 1:
+                        self.log('\n'.join(["%s='%s'" % (k,v) for k,v in self.ws.factura.items()]))
+
+                    cae = self.ws.CAESolicitar()
+                    kargs.update({
+                        'cae': self.ws.CAE,
+                        'fecha_vto': self.ws.Vencimiento,
+                        'resultado': self.ws.Resultado,
+                        'motivo': self.ws.Obs,
+                        'reproceso': 'N',
+                        'err_code': self.ws.ErrCode.encode("latin1"),
+                        'err_msg': self.ws.ErrMsg.encode("latin1"),
+                        })
+                    if self.ws.ErrMsg:
+                            dialog.alertDialog(self, self.ws.ErrMsg, "Error AFIP")
+                
                 self.items[i] = kargs
-                self.log("ID: %s CAE: %s Motivo: %s Reproceso: %s" % (kargs['id'], kargs['cae'], kargs['motivo'],kargs['reproceso']))
+                self.log(u"ID: %s CAE: %s Motivo: %s Reproceso: %s" % (kargs['id'], kargs['cae'], kargs['motivo'],kargs['reproceso']))
                 if kargs['resultado'] == "R":
                     rechazadas += 1
                 else:
@@ -314,12 +435,19 @@ Para solicitar soporte comercial, escriba a pyafipws@nsis.com.ar
             self.set_selected_items(selected)
             self.progreso(len(self.items))
             dialog.alertDialog(self, 'Proceso finalizado OK!\n\nAceptadas: %d\nRechazadas: %d' % (ok, rechazadas), 'Autorización')
-        except SoapFault,e:
+        except (SoapFault, wsfev1.SoapFault),e:
             self.error(e.faultcode, e.faultstring.encode("ascii","ignore"))
         except wsfe.WSFEError,e:
             self.error(e.code, e.msg.encode("ascii","ignore"))
+        except KeyError, e:
+            self.error("Error",u'Campo obligatorio no encontrado: %s' % e)
         except Exception, e:
             self.error(u'Excepción',unicode(e))
+        finally:
+            if DEBUG:
+                if self.webservice == 'wsfev1':
+                    self.log(self.ws.XmlRequest)
+                    self.log(self.ws.XmlResponse)
 
     def on_btnAutorizarLote_mouseClick(self, event):
         try:
@@ -523,7 +651,7 @@ Para solicitar soporte comercial, escriba a pyafipws@nsis.com.ar
         
         if letra=='A':
             f.set('NETO', fmtimp(item['imp_neto']))
-            f.set('IVA21', fmtimp(item['impto_liq']))
+            f.set('IVA21', fmtimp(item.get('impto_liq', item.get('imp_iva'))))
             f.set('LeyendaIVA',"")
         else:
             f.set('NETO.L',"")
@@ -584,17 +712,17 @@ Para solicitar soporte comercial, escriba a pyafipws@nsis.com.ar
             
         
 if __name__ == '__main__':
-    if len(sys.argv)>1:
+    if len(sys.argv)>1 and not sys.argv[1].startswith("-"):
         CONFIG_FILE = sys.argv[1]
     config = SafeConfigParser()
     config.read(CONFIG_FILE)
     cert = config.get('WSAA','CERT')
     privatekey = config.get('WSAA','PRIVATEKEY')
     cuit = config.get('WSFE','CUIT')
-    if config.has_option('WSFE','ENTRADA'):
+    if False and config.has_option('WSFE','ENTRADA'):
         entrada = config.get('WSFE','ENTRADA')
     else:
-        entrada = "facturas.csv"
+        entrada = "" #"facturas-wsfev1.csv"
     if config.has_option('WSFE','ENTRADA'):
         salida = config.get('WSFE','SALIDA')
     else:

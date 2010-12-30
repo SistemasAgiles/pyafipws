@@ -15,9 +15,11 @@
 __author__ = "Mariano Reingart (mariano@nsis.com.ar)"
 __copyright__ = "Copyright (C) 2009 Mariano Reingart"
 __license__ = "GPL 3.0"
-__version__ = "1.17"
+__version__ = "1.24e"
 
+import os
 import sys
+import time
 import traceback
 from ConfigParser import SafeConfigParser
 
@@ -66,11 +68,15 @@ def leer(linea, formato):
     dic = {}
     for clave, (comienzo, longitud, tipo) in formato.items():
         valor = linea[comienzo-1:comienzo-1+longitud].strip()
-        if tipo == N and valor:
-            valor = str(int(valor))
-        if tipo == I and valor:
-            valor = "%s.%02d" % (int(valor[:-2]), int(valor[-2:]))
-        dic[clave] = valor
+        try:
+            if tipo == N and valor:
+                valor = str(int(valor))
+            if tipo == I and valor:
+                valor = "%s.%02d" % (int(valor[:-2]), int(valor[-2:]))
+            dic[clave] = valor
+        except Exception, e:
+            raise ValueError("Error al leer campo %s pos %s val '%s': %s" % (
+                clave, comienzo, valor, str(e)))
     return dic
 
 def escribir(dic, formato):
@@ -87,10 +93,17 @@ def escribir(dic, formato):
     return linea + "\n"
 
 def autenticar(cert, privatekey, url):
-    tra = wsaa.create_tra()
-    cms = wsaa.sign_tra(str(tra),str(cert),str(privatekey))
-    xml = wsaa.call_wsaa(str(cms),url)
-    ta = SimpleXMLElement(xml)
+    "Obtener el TA"
+    TA = "TA-wsfe.xml"
+    ttl = 60*60*5
+    if not os.path.exists(TA) or os.path.getmtime(TA)+(ttl)<time.time():
+        import wsaa
+        tra = wsaa.create_tra(service="wsfe",ttl=ttl)
+        cms = wsaa.sign_tra(str(tra),str(cert),str(privatekey))
+        ta_string = wsaa.call_wsaa(cms,wsaa_url,trace=DEBUG)
+        open(TA,"w").write(ta_string)
+    ta_string=open(TA).read()
+    ta = SimpleXMLElement(ta_string)
     token = str(ta.credentials.token)
     sign = str(ta.credentials.sign)
     return token, sign
@@ -115,6 +128,16 @@ def autorizar(client, token, sign, cuit, entrada, salida, formato):
             kargs.update(ret)
             salida.write(escribir(kargs, FORMATO))
             print "ID:", kargs['id'], "CAE:",kargs['cae'],"Motivo:",kargs['motivo'],"Reproceso:",kargs['reproceso']
+
+
+def depurar_xml(client):
+    fecha = time.strftime("%Y%m%d%H%M%S")
+    f=open("request-%s.xml" % fecha,"w")
+    f.write(client.xml_request)
+    f.close()
+    f=open("response-%s.xml" % fecha,"w")
+    f.write(client.xml_response)
+    f.close()
 
 
 if __name__ == "__main__":
@@ -151,12 +174,14 @@ if __name__ == "__main__":
     if '/debug'in sys.argv:
         DEBUG = True
 
+    XML = '/xml' in sys.argv
+
     if DEBUG:
         print "wsaa_url %s\nwsfe_url %s" % (wsaa_url, wsfe_url)
     
     try:
         client = SoapClient(wsfe_url, action=wsfe.SOAP_ACTION, namespace=wsfe.SOAP_NS,
-                            trace=False, exceptions=True)
+                            trace=DEBUG, exceptions=True)
 
         if '/dummy' in sys.argv:
             print "Consultando estado de servidores..."
@@ -203,6 +228,9 @@ if __name__ == "__main__":
         finally:
             if f_entrada is not None: f_entrada.close()
             if f_salida is not None: f_salida.close()
+            if XML:
+                depurar_xml(client)
+
         sys.exit(0)
     
     except SoapFault,e:
