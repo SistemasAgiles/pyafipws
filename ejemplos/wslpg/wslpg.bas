@@ -61,7 +61,26 @@ Sub Main()
         Debug.Print "authserver status", WSLPG.AuthServerStatus
     End If
     
-    nro_orden = 1
+    ' Consulto las campanias (usando dos puntos como separador)
+    For Each parametro In WSLPG.ConsultarCampanias(":")
+        Debug.Print parametro ' devuelve un string ": codigo : descripcion :"
+    Next
+    
+    ' obtengo el último número de orden registrado
+    ok = WSLPG.ConsultarUltNroOrden()
+    If ok Then
+        nro_orden = WSLPG.NroOrden + 1   ' uso el siguiente
+        ' NOTA: es recomendable llevar internamente el control del numero de orden
+        '       (ya que sirve para recuperar datos de una liquidación ante AFIP)
+        '       ver documentación oficial de AFIP, sección "Tratamiento Nro Orden"
+    Else
+        ' revisar el error, posiblemente no se pueda continuar
+        Debug.Print WSLPG.Traceback
+        Debug.Print WSLPG.ErrMsg
+        MsgBox "No se pudo obtener el último número de orden!"
+        nro_orden = 1                    ' uso el primero
+    End If
+    
     cuit_comprador = "23000000000"
     nro_act_comprador = 99: nro_ing_bruto_comprador = "23000000000"
     cod_tipo_operacion = 1
@@ -168,5 +187,26 @@ Sub Main()
         MsgBox WSLPG.Traceback, vbCritical + vbExclamation, WSLPG.Excepcion
     End If
     
-
+    ' consulto una liquidacion
+    
+    ok = WSLPG.ConsultarLiquidacion(nro_orden)
+    If ok Then
+        MsgBox "COE:" & WSLPG.COE & vbCrLf & "Estado: " & WSLPG.Estado & vbCrLf, vbInformation, "Consultar Liquidación:"
+        For Each er In WSLPG.Errores
+            MsgBox er, vbExclamation, "Error"
+        Next
+    End If
+    
+    
+    ' anulo una liquidacion
+    
+    COE = "330100000357"     ' nro ejemplo AFIP
+    ok = WSLPG.AnularLiquidacion(COE)
+    If ok Then
+        MsgBox "Resultado: " & WSLPG.Resultado & vbCrLf, vbInformation, "AnularLiquidación:"
+        For Each er In WSLPG.Errores
+            MsgBox er, vbExclamation, "Error"
+        Next
+    End If
+    
 End Sub
