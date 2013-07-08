@@ -74,6 +74,7 @@ class WSFEXv1:
         self.InstallDir = INSTALL_DIR
         self.DebugLog = ""
         self.FchVencCAE = ""              # retrocompatibilidad
+        self.reintentos = 1               # usado en el decorador de errores
 
     def __analizar_errores(self, ret):
         "Comprueba y extrae errores si existen en la respuesta XML"
@@ -331,7 +332,6 @@ class WSFEXv1:
         self.__analizar_errores(result)
      
         umeds = [] # unidades de medida
-        print result
         for u in result['FEXResultGet']:
             u = u['ClsFEXResponse_UMed']
             try:
@@ -358,7 +358,6 @@ class WSFEXv1:
         self.__analizar_errores(result)
      
         umeds = [] # unidades de medida
-        print result
         for u in result['FEXResultGet']:
             u = u['ClsFEXResponse_Mon']
             try:
@@ -376,6 +375,26 @@ class WSFEXv1:
             
             umeds.append(umed)
         return umeds
+
+    @inicializar_y_capturar_excepciones
+    def GetParamDstPais(self):
+        "Recuperador de valores referenciales de códigos de Países"
+        ret = self.client.FEXGetPARAM_DST_pais(
+            Auth={'Token': self.Token, 'Sign': self.Sign, 'Cuit': self.Cuit, })
+        result = ret['FEXGetPARAM_DST_paisResult']
+        self.__analizar_errores(result)
+     
+        ret = []
+        for u in result['FEXResultGet']:
+            u = u['ClsFEXResponse_DST_pais']
+            try:
+                r = {'codigo': u.get('DST_Codigo'), 'ds': u.get('DST_Ds'), }
+            except Exception, e:
+                print e
+            
+            ret.append(r)
+        return ret
+
 
     @inicializar_y_capturar_excepciones
     def GetParamCtz(self, moneda_id):
@@ -503,7 +522,7 @@ if __name__ == "__main__":
         wsdl = "http://wswhomo.afip.gov.ar/WSFEXv1/service.asmx"
         cache = proxy = ""
         wrapper = "httplib2"
-        cacert = open("geotrust.crt").read()
+        cacert = open("afip_ca_info.crt").read()
         ok = wsfexv1.Conectar(cache, wsdl, proxy, wrapper, cacert)
     
         if '--dummy' in sys.argv:
@@ -640,6 +659,11 @@ if __name__ == "__main__":
             for u in umedidas:
                 print "||%(id)s||%(ds)s||%(vig_desde)s||%(vig_hasta)s||" % u
             umeds = dict([(u.get('id', ""),u.get('ds', "")) for u in umedidas])
+
+            print "=== Pais Destino ==="
+            ret = wsfexv1.GetParamDstPais()    
+            for r in ret:
+                print "||%(codigo)s||%(ds)s||" % r
             
         if "--ctz" in sys.argv:
             print wsfexv1.GetParamCtz('DOL')

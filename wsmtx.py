@@ -17,7 +17,7 @@ WSMTX de AFIP (Factura Electrónica Mercado Interno RG2904 opción A con detalle)
 __author__ = "Mariano Reingart <reingart@gmail.com>"
 __copyright__ = "Copyright (C) 2010 Mariano Reingart"
 __license__ = "GPL 3.0"
-__version__ = "1.07g"
+__version__ = "1.08a"
 
 import datetime
 import decimal
@@ -101,7 +101,8 @@ class WSMTXCA:
                         'ConsultarCotizacionMoneda',
                         'ConsultarPuntosVentaCAE',
                         'ConsultarPuntosVentaCAEA',
-                        'Dummy', 'Conectar', 'Eval', 'DebugLog']
+                        'AnalizarXml', 'ObtenerTagXml',
+                        'Dummy', 'Conectar', 'DebugLog']
     _public_attrs_ = ['Token', 'Sign', 'Cuit', 
         'AppServerStatus', 'DbServerStatus', 'AuthServerStatus', 
         'XmlRequest', 'XmlResponse', 'Version', 'InstallDir',  
@@ -154,11 +155,6 @@ class WSMTXCA:
             self.Log = StringIO()
         self.Log.write(msg)
         self.Log.write('\n\r')
-    
-    def Eval(self, code):
-        "Devolver el resultado de ejecutar una expresión (para depuración)"
-        if not HOMO:
-            return str(eval(code))
 
     def DebugLog(self):
         "Devolver y limpiar la bitácora de depuración"
@@ -738,6 +734,33 @@ class WSMTXCA:
     def xml_response(self):
         return self.XmlResponse
 
+    def AnalizarXml(self, xml=""):
+        "Analiza un mensaje XML (por defecto la respuesta)"
+        try:
+            if not xml or xml=='XmlResponse':
+                xml = self.XmlResponse 
+            elif xml=='XmlRequest':
+                xml = self.XmlRequest 
+            self.xml = SimpleXMLElement(xml)
+            return True
+        except Exception, e:
+            self.Excepcion = u"%s" % (e)
+            return False
+
+    def ObtenerTagXml(self, *tags):
+        "Busca en el Xml analizado y devuelve el tag solicitado"
+        # convierto el xml a un objeto
+        try:
+            if self.xml:
+                xml = self.xml
+                # por cada tag, lo busco segun su nombre o posición
+                for tag in tags:
+                    xml = xml(tag) # atajo a getitem y getattr
+                # vuelvo a convertir a string el objeto xml encontrado
+                return str(xml)
+        except Exception, e:
+            self.Excepcion = u"%s" % (e)
+
 
 def main():
     "Función principal de pruebas (obtener CAE)"
@@ -842,6 +865,12 @@ def main():
             print "CAE consulta", wsmtxca.CAE, wsmtxca.CAE==cae 
             print "NRO consulta", wsmtxca.CbteNro, wsmtxca.CbteNro==cbte_nro 
             print "TOTAL consulta", wsmtxca.ImpTotal, wsmtxca.ImpTotal==imp_total
+
+            wsmtxca.AnalizarXml("XmlResponse")
+            assert wsmtxca.ObtenerTagXml('codigoAutorizacion') == str(wsmtxca.CAE)
+            assert wsmtxca.ObtenerTagXml('codigoConcepto') == str(concepto)
+            assert wsmtxca.ObtenerTagXml('arrayItems', 0, 'item', 'unidadesMtx') == '123456'
+
 
         except:
             print wsmtxca.XmlRequest        
