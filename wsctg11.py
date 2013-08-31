@@ -17,7 +17,7 @@ del web service WSCTG de AFIP
 __author__ = "Mariano Reingart <reingart@gmail.com>"
 __copyright__ = "Copyright (C) 2010 Mariano Reingart"
 __license__ = "LGPL 3.0"
-__version__ = "1.08a"
+__version__ = "1.09c"
 
 LICENCIA = """
 wsctg11.py: Interfaz para generar Código de Trazabilidad de Granos AFIP v1.1
@@ -41,9 +41,18 @@ Opciones:
   --xml: almacena los requerimientos y respuestas XML (depuración)
 
   --dummy: consulta estado de servidores
-  --solicitar: obtiene el CTG
-  --confirmar: confirma el CTG 
+  --solicitar: obtiene el CTG (según archivo de entrada en TXT o CSV)
+  --confirmar: confirma el CTG (según archivo de entrada en TXT o CSV)
+  --anular: anula el CTG
+  --rechazar: permite al destino rechazar el CTG
+  --confirmar_arribo: confirma el arribo de un CTG
+  --confirmar_definitivo: confirma el arribo definitivo de un CTG
 
+  --consultar: consulta las CTG generadas
+  --consultar_excel: consulta las CTG generadas (genera un excel)
+  --consultar_detalle: obtiene el detalle de una CTG
+  --consultar_constancia_pdf: descarga el documento PDF de una CTG
+  
   --provincias: obtiene el listado de provincias
   --localidades: obtiene el listado de localidades por provincia
   --especies: obtiene el listado de especies
@@ -52,14 +61,14 @@ Opciones:
 Ver wsctg.ini para parámetros de configuración (URL, certificados, etc.)"
 """
 
-import os, sys, time
+import os, sys, time, base64
 from php import date
 import traceback
 from pysimplesoap.client import SimpleXMLElement, SoapClient, SoapFault, parse_proxy, set_http_wrapper
+import utils
 
-# importo funciones compartidas, deberían estar en un módulo separado:
-
-from rece1 import leer, escribir, leer_dbf, guardar_dbf  
+# importo funciones compartidas:
+from utils import leer, escribir, leer_dbf, guardar_dbf, N, A, I, json
 
 
 WSDL = "https://fwshomo.afip.gov.ar/wsctg/services/CTGService_v1.1?wsdl"
@@ -70,9 +79,6 @@ CONFIG_FILE = "wsctg.ini"
 HOMO = True
 
 # definición del formato del archivo de intercambio:
-N = 'Numerico'
-A = 'Alfanumerico'
-I = 'Importe'
 
 ENCABEZADO = [
     # datos enviados
@@ -100,7 +106,7 @@ ENCABEZADO = [
     ('transaccion', 12, N), 
     ('tarifa_referencia', 6, I, 2),           # consultar detalle
     ('estado', 20, A), 
-    ('imprime_constancia', 2, A), 
+    ('imprime_constancia', 5, A), 
     ('observaciones', 200, A), 
     ('errores', 1000, A),
     ('controles', 1000, A),
@@ -154,6 +160,7 @@ class WSCTG11:
                         'ConfirmarArribo', 'ConfirmarDefinitivo',
                         'AnularCTG', 'RechazarCTG', 
                         'ConsultarCTG', 'LeerDatosCTG', 'ConsultarDetalleCTG',
+                        'ConsultarCTGExcel', 'ConsultarConstanciaCTGPDF',
                         'ConsultarProvincias', 
                         'ConsultarLocalidadesPorProvincia', 
                         'ConsultarEstablecimientos',
@@ -269,6 +276,9 @@ class WSCTG11:
         cant_horas=None, patente_vehiculo=None, cuit_transportista=None, 
         km_recorridos=None, **kwargs):
         "Solicitar CTG Desde el Inicio"
+        # ajusto parámetros según validaciones de AFIP:
+        if cuit_canjeador and int(cuit_canjeador) == 0:
+            cuit_canjeador = None         # nulo
         ret = self.client.solicitarCTGInicial(request=dict(
                         auth={
                             'token': self.Token, 'sign': self.Sign,
@@ -299,8 +309,9 @@ class WSCTG11:
                 self.FechaHora = str(datos_ctg['fechaEmision'])
                 self.VigenciaDesde = str(datos_ctg['fechaVigenciaDesde'])
                 self.VigenciaHasta = str(datos_ctg['fechaVigenciaHasta'])
+                self.TarifaReferencia = str(datos_ctg.get('tarifaReferencia'))
             self.__analizar_controles(datos)
-        return self.NumeroCTG
+        return self.NumeroCTG or 0
     
     @inicializar_y_capturar_excepciones
     def SolicitarCTGDatoPendiente(self, numero_carta_de_porte, cant_horas, 
@@ -327,6 +338,7 @@ class WSCTG11:
                 self.FechaHora = str(datos_ctg['fechaEmision'])
                 self.VigenciaDesde = str(datos_ctg['fechaVigenciaDesde'])
                 self.VigenciaHasta = str(datos_ctg['fechaVigenciaHasta'])
+                self.TarifaReferencia = str(datos_ctg.get('tarifaReferencia'))
             self.__analizar_controles(datos)
         return self.NumeroCTG
         
@@ -425,6 +437,32 @@ class WSCTG11:
             return ""
 
     @inicializar_y_capturar_excepciones
+    def ConsultarCTGExcel(self, numero_carta_de_porte=None, numero_ctg=None, 
+                     patente=None, cuit_solicitante=None, cuit_destino=None,
+                     fecha_emision_desde=None, fecha_emision_hasta=None,
+                     archivo="planilla.xls"):
+        "Operación que realiza consulta de CTGs, graba una planilla xls"
+        ret = self.client.consultarCTGExcel(request=dict(
+                        auth={
+                            'token': self.Token, 'sign': self.Sign,
+                            'cuitRepresentado': self.Cuit, },
+                        consultarCTGDatos=dict(
+                            cartaPorte=numero_carta_de_porte, 
+                            ctg=numero_ctg,
+                            patente=patente,
+                            cuitSolicitante=cuit_solicitante,
+                            cuitDestino=cuit_destino,
+                            fechaEmisionDesde=fecha_emision_desde,
+                            fechaEmisionHasta=fecha_emision_hasta,
+                            )))['response']
+        self.__analizar_errores(ret)
+        datos = base64.b64decode(ret.get('archivo', ""))
+        f = open(archivo, "wb")
+        f.write(datos)
+        f.close()
+        return True
+        
+    @inicializar_y_capturar_excepciones
     def ConsultarDetalleCTG(self, numero_ctg=None):
         "Operación mostrar este detalle de la  solicitud de CTG seleccionada."
         ret = self.client.consultarDetalleCTG(request=dict(
@@ -443,6 +481,23 @@ class WSCTG11:
             self.VigenciaDesde = str(datos['fechaVigenciaDesde'])
             self.VigenciaHasta = str(datos['fechaVigenciaHasta'])
             self.TarifaReferencia = str(datos['tarifaReferencia'])
+        return True
+
+    @inicializar_y_capturar_excepciones
+    def ConsultarConstanciaCTGPDF(self, numero_ctg=None, 
+                                        archivo="constancia.pdf"):
+        "Operación Consultar Constancia de CTG en PDF"
+        ret = self.client.consultarConstanciaCTGPDF(request=dict(
+                        auth={
+                            'token': self.Token, 'sign': self.Sign,
+                            'cuitRepresentado': self.Cuit, },
+                        ctg=numero_ctg, 
+                        ))['response']
+        self.__analizar_errores(ret)
+        datos = base64.b64decode(ret.get('archivo', ""))
+        f = open(archivo, "wb")
+        f.write(datos)
+        f.close()
         return True
 
     @inicializar_y_capturar_excepciones
@@ -564,11 +619,12 @@ def leer_archivo(nombre_archivo):
         items = [dict([(cols[i],str(v).strip()) for i,v in enumerate(item)]) for item in items[1:]]
         return cols, items
     elif ext == '.json':
-        dic = json.load(archivo)
+        items = json.load(archivo)
     elif ext == '.dbf':
         dic = {}
         formatos = [('Encabezado', ENCABEZADO, dic), ]
         leer_dbf(formatos, conf_dbf)
+        items = [dic]
     elif ext == '.txt':
         dic = {}
         for linea in archivo:
@@ -592,10 +648,10 @@ def escribir_archivo(cols, items, nombre_archivo, agrega=False):
         csv_writer.writerows([cols])
         csv_writer.writerows([[item[k] for k in cols] for item in items])
     elif ext == '.json':
-        json.dump(dic, archivo, sort_keys=True, indent=4)
+        json.dump(items, archivo, sort_keys=True, indent=4)
     elif ext == '.dbf':
-        formatos = [('Encabezado', ENCABEZADO, [dic]), ]
-        guardar_dbf(formatos, agrega, conf_dbf)
+        formatos = [('Encabezado', ENCABEZADO, items), ]
+        guardar_dbf(formatos, True, conf_dbf)
     elif ext == '.txt':
         for dic in items:
             dic['tipo_reg'] = 0
@@ -672,6 +728,12 @@ if __name__ == '__main__':
             wsctg_url = config.get('WSCTG','URL')
         else:
             wsctg_url = WSDL
+
+        if config.has_section('DBF'):
+            conf_dbf = dict(config.items('DBF'))
+            if DEBUG: print "conf_dbf", conf_dbf
+        else:
+            conf_dbf = {}
 
         DEBUG = '--debug' in sys.argv
         XML = '--xml' in sys.argv
@@ -769,14 +831,13 @@ if __name__ == '__main__':
 
         if '--prueba' in sys.argv or '--formato' in sys.argv:
             prueba = dict(numero_carta_de_porte=512345679, codigo_especie=23,
-                cuit_canjeador=30660685908, 
+                cuit_canjeador=0, #30660685908, 
                 cuit_destino=20061341677, cuit_destinatario=20267565393, 
                 codigo_localidad_origen=3058, codigo_localidad_destino=3059, 
                 codigo_cosecha='0910', peso_neto_carga=1000, 
                 km_recorridos=1234,
-                numero_ctg="43816783", transaccion='10000001681', 
-                observaciones='',      
-                cant_kilos_carta_porte=1000, establecimiento=1,
+                ##numero_ctg="43816783", transaccion='10000001681', 
+                observaciones='', establecimiento=1,
             )
             parcial = dict(
                     cant_horas=1, 
@@ -802,9 +863,11 @@ if __name__ == '__main__':
                 print "Fecha y Hora", wsctg.FechaHora
                 print "Vigencia Desde", wsctg.VigenciaDesde
                 print "Vigencia Hasta", wsctg.VigenciaHasta
+                print "Tarifa Referencia: ", wsctg.TarifaReferencia
                 print "Errores:", wsctg.Errores
                 print "Controles:", wsctg.Controles
-                it['numero_ctg'] = ctg
+                it['numero_ctg'] = wsctg.NumeroCTG
+                it['tarifa_referencia'] = wsctg.TarifaReferencia
                 it['observaciones'] = wsctg.Observaciones
                 it['fecha_hora'] = wsctg.FechaHora
                 it['vigencia_desde'] = wsctg.VigenciaDesde
@@ -826,9 +889,11 @@ if __name__ == '__main__':
                 print "Fecha y Hora", wsctg.FechaHora
                 print "Vigencia Desde", wsctg.VigenciaDesde
                 print "Vigencia Hasta", wsctg.VigenciaHasta
+                print "Tarifa Referencia: ", wsctg.TarifaReferencia
                 print "Errores:", wsctg.Errores
                 print "Controles:", wsctg.Controles
-                it['numero_ctg'] = ctg
+                it['numero_ctg'] = wsctg.NumeroCTG
+                it['tarifa_referencia'] = wsctg.TarifaReferencia
                 it['errores'] = '|'.join(wsctg.Errores)
                 it['controles'] = '|'.join(wsctg.Controles)
 
@@ -899,7 +964,7 @@ if __name__ == '__main__':
                           'tarifaReferencia': 'tarifa_referencia', }.items():
                     v = wsctg.ObtenerTagXml('consultarDetalleCTGDatos', k)
                     print k, v
-                    if ki.startswith("cuit"):
+                    if ki.startswith("cuit") and v:
                         v = v[:11]
                     it[ki] = v
     
@@ -910,6 +975,29 @@ if __name__ == '__main__':
             wsctg.ConsultarCTG(fecha_emision_desde="01/04/2012")
             while wsctg.LeerDatosCTG():
                 print "numero CTG: ", wsctg.NumeroCTG
+
+        if '--consultar_excel' in sys.argv:
+            archivo = raw_input("Archivo a generar (planilla.xls): ") or \
+                        'planilla.xls'
+            wsctg.LanzarExcepciones = True
+            ok = wsctg.ConsultarCTGExcel(fecha_emision_desde="01/04/2012",
+                                         archivo=archivo)
+            print "Errores:", wsctg.Errores
+
+        if '--consultar_constancia_pdf' in sys.argv:
+            i = sys.argv.index("--consultar_constancia_pdf")
+            if len(sys.argv) > i + 2 and not sys.argv[i+1].startswith("--"):
+                ctg = int(sys.argv[i+1])
+                archivo = sys.argv[i+2]
+            elif not ctg:
+                ctg = int(raw_input("Numero de CTG: ") or '0') or 83139794
+                archivo = raw_input("Archivo a generar (constancia.pdf): ") or \
+                            'constancia.pdf'
+
+            wsctg.LanzarExcepciones = True
+            ok = wsctg.ConsultarConstanciaCTGPDF(ctg, archivo)
+            print "Errores:", wsctg.Errores
+
             
         print "hecho."
         
@@ -917,7 +1005,8 @@ if __name__ == '__main__':
         print "Falla SOAP:", e.faultcode, e.faultstring.encode("ascii","ignore")
         sys.exit(3)
     except Exception, e:
-        print unicode(e).encode("ascii","ignore")
+        ex = utils.exception_info()
+        print ex
         if DEBUG:
             raise
         sys.exit(5)

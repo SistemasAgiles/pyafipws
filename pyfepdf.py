@@ -15,7 +15,7 @@
 __author__ = "Mariano Reingart <reingart@gmail.com>"
 __copyright__ = "Copyright (C) 2011 Mariano Reingart"
 __license__ = "GPL 3.0"
-__version__ = "1.07b"
+__version__ = "1.07c"
 
 DEBUG = False
 HOMO = True
@@ -55,7 +55,7 @@ import sys
 import traceback
 from cStringIO import StringIO
 from decimal import Decimal
-from pyfpdf_hg import Template
+from fpdf import Template
 
 def inicializar_y_capturar_excepciones(func):
     "Decorador para inicializar y capturar errores"
@@ -807,6 +807,11 @@ if __name__ == '__main__':
                 conf_dbf = dict(config.items('DBF'))
                 if DEBUG: print "conf_dbf", conf_dbf
                 regs = formato_dbf.leer(conf_dbf)
+            if '--json' in sys.argv:
+                import formato_json
+                entrada = conf_fact.get("entrada", "entrada.txt")
+                if DEBUG: print "entrada", entrada
+                regs = formato_json.leer(entrada)
             else:
                 import formato_txt
                 entrada = conf_fact.get("entrada", "entrada.txt")
@@ -893,7 +898,7 @@ if __name__ == '__main__':
             iva_id = 5
             imp_iva = 21.00
             importe = 121.00
-            despacho = 'Nº 123456'
+            despacho = u'Nº 123456'
             fepdf.AgregarDetalleItem(u_mtx, cod_mtx, codigo, ds, qty, umed, 
                     precio, bonif, iva_id, imp_iva, importe, despacho)
 
@@ -910,6 +915,11 @@ if __name__ == '__main__':
                 conf_dbf = dict(config.items('DBF'))
                 if DEBUG: print "conf_dbf", conf_dbf
                 regs = formato_dbf.escribir([reg], conf_dbf)
+            elif '--json' in sys.argv:
+                import formato_json
+                archivo =  conf_fact.get("entrada", "entrada.txt")
+                if DEBUG: print "Escribiendo", archivo
+                regs = formato_json.escribir([reg], archivo)
             else:
                 import formato_txt
                 archivo =  conf_fact.get("entrada", "entrada.txt")

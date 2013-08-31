@@ -17,7 +17,7 @@ Liquidación Primaria Electrónica de Granos del web service WSLPG de AFIP
 __author__ = "Mariano Reingart <reingart@gmail.com>"
 __copyright__ = "Copyright (C) 2013 Mariano Reingart"
 __license__ = "GPL 3.0"
-__version__ = "1.11e"
+__version__ = "1.12e"
 
 LICENCIA = """
 wslpg.py: Interfaz para generar Código de Operación Electrónica para
@@ -84,24 +84,9 @@ from pysimplesoap.client import SimpleXMLElement, SoapClient, SoapFault, parse_p
 from pyfpdf_hg import Template
 import utils
 
-# importo funciones compartidas, deberían estar en un módulo separado:
+# importo funciones compartidas:
+from utils import leer, escribir, leer_dbf, guardar_dbf, N, A, I, json
 
-from rece1 import leer, escribir, leer_dbf, guardar_dbf  
-
-# importo paquetes para formatos de archivo de intercambio (opcional)
-
-try:
-    import json
-except ImportError:
-    try:
-        import simplejson as json 
-    except:
-        print "para soporte de JSON debe instalar simplejson"
-try:
-    import dbf
-except ImportError:
-    print "para soporte de DBF debe instalar dbf 0.88.019 o superior"
-    
 
 WSDL = "https://fwshomo.afip.gov.ar/wslpg/LpgService?wsdl"
 #WSDL = "https://serviciosjava.afip.gob.ar/wslpg/LpgService?wsdl"
@@ -113,9 +98,6 @@ CONFIG_FILE = "wslpg.ini"
 HOMO = True
 
 # definición del formato del archivo de intercambio:
-N = 'Numerico'
-A = 'Alfanumerico'
-I = 'Importe'
 
 ENCABEZADO = [
     ('tipo_reg', 1, A), # 0: encabezado
@@ -146,7 +128,7 @@ ENCABEZADO = [
     ('alic_iva_operacion', 5, I, 2), # 3.2
     ('campania_ppal', 4, N),
     ('cod_localidad_procedencia', 6, N), 
-    ('datos_adicionales', 200, A), # max 400 por WSLPGv1.2
+    ('reservado1', 200, A),   # datos_adicionales (compatibilidad hacia atras)
     
     ('coe', 12, N),
     ('coe_ajustado', 12, N),
@@ -179,7 +161,19 @@ ENCABEZADO = [
     # Campos WSLPGv1.3:
     ('cod_prov_procedencia_sin_certificado', 2, N),
     ('cod_localidad_procedencia_sin_certificado', 6, N), 
-        
+
+    # Campos WSLPGv1.4 (ajustes):
+    ('nro_contrato', 15, N),
+    ('tipo_formulario', 2, N), 
+    ('nro_formulario', 12, N), 
+    # datos devuetos:
+    ('total_iva_10_5', 17, I, 2), # 17.2
+    ('total_iva_21', 17, I, 2), # 17.2
+    ('total_retenciones_ganancias', 17, I, 2), # 17.2
+    ('total_retenciones_iva', 17, I, 2), # 17.2
+    
+    ('datos_adicionales', 400, A), # max 400 desde WSLPGv1.2
+
     ]
 
 CERTIFICADO = [
@@ -192,6 +186,7 @@ CERTIFICADO = [
     ('reservado', 2, N),
     ('campania', 4, N),
     ('fecha_cierre', 10, A),
+    ('peso_neto_total_certificado', 8, N), # para ajuste unificado (WSLPGv1.4)
     ]
     
 RETENCION = [
@@ -220,6 +215,38 @@ DEDUCCION = [
     ('precio_pkg_diario', 11, I, 8), # 3.8, ajustado WSLPGv1.2
     ]
 
+AJUSTE = [
+    ('tipo_reg', 1, A), # 4: ajuste débito / 5: crédito (WSLPGv1.4)
+    ('concepto_importe_iva_0', 20, A),
+    ('importe_ajustar_iva_0', 15, I, 2), # 11.2
+    ('concepto_importe_iva_105', 20, A),
+    ('importe_ajustar_iva_105', 15, I, 2), # 11.2
+    ('concepto_importe_iva_21', 20, A),
+    ('importe_ajustar_iva_21', 15, I, 2), # 11.2
+    ('diferencia_peso_neto', 8, N),
+    ('diferencia_precio_operacion', 17, I, 3), # 17.3
+    ('cod_grado', 2, A),
+    ('val_grado', 4, I, 3), # 1.3
+    ('factor', 6, I, 3), # 3.3
+    ('diferencia_precio_flete_tn', 7, I, 2), # 5.2
+    ('datos_adicionales', 400, A),
+    # datos devueltos:
+    ('fecha_liquidacion', 10, A), 
+    ('nro_op_comercial', 10, N), 
+    ('precio_operacion', 17, I, 3), # 17.3
+    ('subtotal', 17, I, 2), # 17.2
+    ('importe_iva', 17, I, 2), # 17.2
+    ('operacion_con_iva', 17, I, 2), # 17.2
+    ('total_peso_neto', 8, N), # 17.2
+    ('total_deduccion', 17, I, 2), # 17.2
+    ('total_retencion', 17, I, 2), # 17.2
+    ('total_retencion_afip', 17, I, 2), # 17.2
+    ('total_otras_retenciones', 17, I, 2), # 17.2
+    ('total_neto_a_pagar', 17, I, 2), # 17.2
+    ('total_iva_rg_2300_07', 17, I, 2), # 17.2
+    ('total_pago_segun_condicion', 17, I, 2), # 17.2
+    ]
+
 EVENTO = [
     ('tipo_reg', 1, A), # E: Evento
     ('codigo', 4, A), 
@@ -244,11 +271,11 @@ def inicializar_y_capturar_excepciones(func):
     def capturar_errores_wrapper(self, *args, **kwargs):
         try:
             # inicializo (limpio variables)
-            self.COE = self.COEAjustado = ""
+            self.COE = self.COEAjustado = NroContrato = ""
             self.Excepcion = self.Traceback = ""
             self.ErrMsg = self.ErrCode = ""
             self.Errores = []
-            self.Estado = self.Resultado = self.NroOrden = ''
+            self.Estado = self.Resultado = self.NroOrden = self.NroContrato = ''
             self.TotalDeduccion = ""
             self.TotalRetencion = ""
             self.TotalRetencionAfip = ""
@@ -256,6 +283,8 @@ def inicializar_y_capturar_excepciones(func):
             self.TotalNetoAPagar = ""
             self.TotalIvaRg2300_07 = ""
             self.TotalPagoSegunCondicion = ""
+            self.Subtotal = self.TotalIva105 = self.TotalIva21 = ""
+            self.TotalRetencionesGanancias = self.TotalRetencionesIVA = ""
             # actualizo los parámetros
             kwargs.update(self.params_in)
             # limpio los parámetros
@@ -295,12 +324,18 @@ def inicializar_y_capturar_excepciones(func):
 class WSLPG:
     "Interfaz para el WebService de Liquidación Primaria de Granos"    
     _public_methods_ = ['Conectar', 'Dummy', 'LoadTestXML',
-                        'AutorizarLiquidacion', 'AjustarLiquidacion',
+                        'AutorizarLiquidacion', 
                         'AnularLiquidacion',
                         'CrearLiquidacion',  
                         'AgregarCertificado', 'AgregarRetencion', 
                         'AgregarDeduccion',
                         'ConsultarLiquidacion', 'ConsultarUltNroOrden',
+                        'CrearAjusteBase', 
+                        'CrearAjusteDebito', 'CrearAjusteCredito',
+                        'AjustarLiquidacionUnificado',
+                        'AjustarLiquidacionUnificadoPapel',
+                        'AjustarLiquidacionContrato',
+                        'AnalizarAjusteDebito', 'AnalizarAjusteCredito',
                         'ConsultarCampanias',
                         'ConsultarTipoGrano',
                         'ConsultarGradoEntregadoXTipoGrano',
@@ -328,7 +363,8 @@ class WSLPG:
         'COE', 'COEAjustado', 'Estado', 'Resultado', 'NroOrden',
         'TotalDeduccion', 'TotalRetencion', 'TotalRetencionAfip', 
         'TotalOtrasRetenciones', 'TotalNetoAPagar', 'TotalPagoSegunCondicion',
-        'TotalIvaRg2300_07'
+        'TotalIvaRg2300_07', 'Subtotal', 'TotalIva105', 'TotalIva21',
+        'TotalRetencionesGanancias', 'TotalRetencionesIVA', 'NroContrato',
         ]
     _reg_progid_ = "WSLPG"
     _reg_clsid_ = "{9D21C513-21A6-413C-8592-047357692608}"
@@ -364,8 +400,8 @@ class WSLPG:
         self.client = SoapClient(url,
             wsdl=url, cache=cache,
             trace='--trace' in sys.argv, 
-            ns='wslpg', soap_ns='soapenv',
-            cacert = cacert,
+            ns='wslpg', #soap_ns='soapenv',
+            cacert = cacert, #server="",
             exceptions=True, proxy=proxy_dict)
        
         # corrijo ubicación del servidor (puerto htttp 80 en el WSDL)
@@ -435,6 +471,7 @@ class WSLPG:
                peso_neto_sin_certificado=None, val_grado_ent=None,
                cod_localidad_procedencia_sin_certificado=None,
                cod_prov_procedencia_sin_certificado=None,
+               nro_contrato=None,
                **kwargs
                ):
         "Inicializa internamente los datos de una liquidación para autorizar"
@@ -501,6 +538,7 @@ class WSLPG:
                             codProvProcedencia=cod_prov_procedencia,
                             datosAdicionales=datos_adicionales,
                             pesoNetoSinCertificado=peso_neto_sin_certificado,
+                            numeroContrato=nro_contrato or None,
                             certificados=[],
             )
         # para compatibilidad hacia atras, "copiar" los campos si no hay cert:
@@ -524,10 +562,9 @@ class WSLPG:
                            peso_neto=None,
                            cod_localidad_procedencia=None,
                            cod_prov_procedencia=None,
-                           campania=None,
-                           fecha_cierre=None, **kwargs):
+                           campania=None, fecha_cierre=None, 
+                           peso_neto_total_certificado=None, **kwargs):
         "Agrego el certificado a la liquidación"
-        
         self.liquidacion['certificados'].append(
                     dict(certificado=dict(
                         tipoCertificadoDeposito=tipo_certificado_deposito,
@@ -537,6 +574,7 @@ class WSLPG:
                         codProvProcedencia=cod_prov_procedencia,
                         campania=campania,
                         fechaCierre=fecha_cierre,
+                        pesoNetoTotalCertificado=peso_neto_total_certificado,
                       )))
 
     @inicializar_y_capturar_excepciones
@@ -688,9 +726,10 @@ class WSLPG:
             self.TotalNetoAPagar = aut['totalNetoAPagar']
             self.TotalIvaRg2300_07 = aut['totalIvaRg2300_07']
             self.TotalPagoSegunCondicion = aut['totalPagoSegunCondicion']
-            self.COE = str(aut['coe'])
+            self.COE = str(aut.get('coe', ''))
             self.COEAjustado = aut.get('coeAjustado')
-            self.Estado = aut['estado']
+            self.Estado = aut.get('estado', '')
+            self.NroContrato = aut.get('numeroContrato', '')
 
             # actualizo parámetros de salida:
             self.params_out['coe'] = self.COE
@@ -746,31 +785,297 @@ class WSLPG:
                     })
         
 
+    @inicializar_y_capturar_excepciones
+    def CrearAjusteBase(self, 
+               pto_emision=1, nro_orden=None,       # unificado, contrato, papel
+               coe_ajustado=None,                   # unificado
+               nro_contrato=None,                   # contrato
+               tipo_formulario=None,                # papel
+               nro_formulario=None,                 # papel
+               actividad=None,                      # contrato / papel
+               cod_grano=None,                      # contrato / papel
+               cuit_vendedor=None,                  # contrato / papel
+               cuit_comprador=None,                 # contrato / papel
+               cuit_corredor=None,                  # contrato / papel
+               nro_ing_bruto_vendedor=None,         # papel
+               nro_ing_bruto_comprador=None,        # papel
+               nro_ing_bruto_corredor=None,         # papel
+               tipo_operacion=None,                 # papel
+               precio_ref_tn=None,                  # contrato
+               cod_grado_ent=None,                  # contrato
+               val_grado_ent=None,                  # contrato
+               precio_flete_tn=None,                # contrato
+               cod_puerto=None,                     # contrato
+               des_puerto_localidad=None,           # contrato
+               cod_provincia=None,                  # unificado, contrato, papel
+               cod_localidad=None,                  # unificado, contrato, papel
+               comision_corredor=None,              # papel
+               **kwargs
+               ):
+        "Inicializa internamente los datos de una liquidación para ajustar"
+
+        # ajusto nombre de campos para compatibilidad hacia atrás (encabezado):
+        if 'cod_localidad_procedencia' in kwargs:
+            import pdb; pdb.set_trace()
+            cod_localidad = kwargs['cod_localidad_procedencia']
+        if 'cod_provincia_procedencia' in kwargs:
+            cod_provincia = kwargs['cod_provincia_procedencia']
+        if 'nro_act_comprador' in kwargs:
+            actividad = kwargs['nro_act_comprador']
+        if 'cod_tipo_operacion' in kwargs:
+            tipo_operacion = kwargs['cod_tipo_operacion']
+            
+        # limpio los campos especiales (segun validaciones de AFIP)
+        if val_grado_ent == 0:
+            val_grado_ent = None
+        # borrando datos si no corresponden
+        if cuit_corredor and int(cuit_corredor) == 0:
+            cuit_corredor = None
+            comision_corredor = None
+            nro_ing_bruto_corredor = None
+               
+        if cod_puerto and int(cod_puerto) != 14:
+            des_puerto_localidad = None             # validacion 1630
+
+        # limpio los campos opcionales para no enviarlos si no corresponde:
+        if cod_grado_ent == "":
+            cod_grado_ent = None
+        if val_grado_ent == 0:
+            val_grado_ent = None
+
+        # creo el diccionario con los campos generales del ajuste base:
+        self.ajuste = { 'ajusteBase': {
+                            'ptoEmision': pto_emision,
+                            'nroOrden': nro_orden,
+                            'coeAjustado': coe_ajustado,
+                            'nroContrato': nro_contrato,
+                            'tipoFormulario': tipo_formulario,
+                            'nroFormulario': nro_formulario,
+                            'actividad': actividad,
+                            'codGrano': cod_grano,
+                            'cuitVendedor': cuit_vendedor,
+                            'cuitComprador': cuit_comprador,
+                            'cuitCorredor': cuit_corredor,
+                            'nroIngBrutoVendedor': nro_ing_bruto_vendedor,
+                            'nroIngBrutoComprador': nro_ing_bruto_comprador,
+                            'nroIngBrutoCorredor': nro_ing_bruto_corredor,
+                            'tipoOperacion': tipo_operacion,
+                            'codPuerto': cod_puerto,
+                            'desPuertoLocalidad': des_puerto_localidad,
+                            'comisionCorredor': comision_corredor,
+                            'precioRefTn': precio_ref_tn,
+                            'codGradoEnt': cod_grado_ent,
+                            'valGradoEnt': val_grado_ent,
+                            'precioFleteTn': precio_flete_tn,
+                            'codLocalidad': cod_localidad,
+                            'codProv': cod_provincia,
+                            'certificados': [],
+                            }
+                        }
+        # para compatibilidad con AgregarCertificado
+        self.liquidacion = self.ajuste['ajusteBase']
 
     @inicializar_y_capturar_excepciones
-    def AjustarLiquidacion(self, coe_ajustado=None, cod_tipo_ajuste=None, 
-                                 total_peso_neto=None, precio_operacion=None,):
-        "Ajustar Liquidación Primaria de Granos (tipo: 3 – Débito, 4 – Crédito)"
-        ajuste = self.liquidacion.copy()
-        # completo los datos del ajuste:
-        ajuste['coeAjustado'] = coe_ajustado
-        ajuste['codTipoAjuste'] = cod_tipo_ajuste
-        ajuste['totalPesoNeto'] = total_peso_neto
-        ajuste['precioOperacion'] = precio_operacion
+    def CrearAjusteCredito(self, 
+               datos_adicionales=None,              # unificado, contrato, papel
+               concepto_importe_iva_0=None,         # unificado, contrato, papel
+               importe_ajustar_iva_0=None,          # unificado, contrato, papel
+               concepto_importe_iva_105=None,       # unificado, contrato, papel
+               importe_ajustar_iva_105=None,        # unificado, contrato, papel
+               concepto_importe_iva_21=None,        # unificado, contrato, papel
+               importe_ajustar_iva_21=None,         # unificado, contrato, papel
+               diferencia_peso_neto=None,           # unificado
+               diferencia_precio_operacion=None,    # unificado
+               cod_grado=None,                      # unificado
+               val_grado=None,                      # unificado  
+               factor=None,                         # unificado
+               diferencia_precio_flete_tn=None,     # unificado
+               **kwargs
+               ):
+        "Inicializa internamente los datos del crédito del ajuste"
+
+        self.ajuste['ajusteCredito'] = {
+            'diferenciaPesoNeto': diferencia_peso_neto,
+            'diferenciaPrecioOperacion': diferencia_precio_operacion,
+            'codGrado': cod_grado,
+            'valGrado': val_grado,
+            'factor': factor,
+            'diferenciaPrecioFleteTn': diferencia_precio_flete_tn,
+            'datosAdicionales': datos_adicionales,
+            'opcionales': None,
+            'conceptoImporteIva0': concepto_importe_iva_0,
+            'importeAjustarIva0': importe_ajustar_iva_0,
+            'conceptoImporteIva105': concepto_importe_iva_105,
+            'importeAjustarIva105': importe_ajustar_iva_105,
+            'conceptoImporteIva21': concepto_importe_iva_21,
+            'deducciones': [],
+            'retenciones': [],
+            }
+        # vinculación con AgregarOpcional:
+        self.opcionales = self.ajuste['ajusteCredito']['opcionales']
+        # vinculación con AgregarRetencion y AgregarDeduccion
+        self.deducciones = self.ajuste['ajusteCredito']['deducciones']
+        self.retenciones = self.ajuste['ajusteCredito']['retenciones']
+
+    @inicializar_y_capturar_excepciones
+    def CrearAjusteDebito(self, 
+               datos_adicionales=None,              # unificado, contrato, papel
+               concepto_importe_iva_0=None,         # unificado, contrato, papel
+               importe_ajustar_iva_0=None,          # unificado, contrato, papel
+               concepto_importe_iva_105=None,       # unificado, contrato, papel
+               importe_ajustar_iva_105=None,        # unificado, contrato, papel
+               concepto_importe_iva_21=None,        # unificado, contrato, papel
+               importe_ajustar_iva_21=None,         # unificado, contrato, papel
+               diferencia_peso_neto=None,           # unificado
+               diferencia_precio_operacion=None,    # unificado
+               cod_grado=None,                      # unificado
+               val_grado=None,                      # unificado  
+               factor=None,                         # unificado
+               diferencia_precio_flete_tn=None,     # unificado
+               **kwargs
+               ):
+        "Inicializa internamente los datos del crédito del ajuste"
+
+        self.ajuste['ajusteDebito'] = {
+            'diferenciaPesoNeto': diferencia_peso_neto,
+            'diferenciaPrecioOperacion': diferencia_precio_operacion,
+            'codGrado': cod_grado,
+            'valGrado': val_grado,
+            'factor': factor,
+            'diferenciaPrecioFleteTn': diferencia_precio_flete_tn,
+            'datosAdicionales': datos_adicionales,
+            'opcionales': None,
+            'conceptoImporteIva0': concepto_importe_iva_0,
+            'importeAjustarIva0': importe_ajustar_iva_0,
+            'conceptoImporteIva105': concepto_importe_iva_105,
+            'importeAjustarIva105': importe_ajustar_iva_105,
+            'conceptoImporteIva21': concepto_importe_iva_21,
+            'deducciones': [],
+            'retenciones': [],
+            }
+        # vinculación con AgregarOpcional:
+        self.opcionales = self.ajuste['ajusteDebito']['opcionales']
+        # vinculación con AgregarRetencion y AgregarDeduccion
+        self.deducciones = self.ajuste['ajusteDebito']['deducciones']
+        self.retenciones = self.ajuste['ajusteDebito']['retenciones']
         
-        ret = self.client.liquidacionAjustar(
+    @inicializar_y_capturar_excepciones
+    def AjustarLiquidacionUnificado(self):
+        "Ajustar Liquidación Primaria de Granos"
+        
+        ret = self.client.liquidacionAjustarUnificado(
                         auth={
                             'token': self.Token, 'sign': self.Sign,
                             'cuit': self.Cuit, },
-                        ajuste=ajuste,
-                        deducciones=self.deducciones,
-                        retenciones=self.retenciones,
+                        **self.ajuste
                         )
-        ret = ret['ajusteReturn']
+        ret = ret['ajusteUnifReturn']
         self.__analizar_errores(ret)
-        if 'autorizacion' in ret:
-            aut = ret['autorizacion']
-            self.AnalizarLiquidacion(aut)
+        if 'ajusteUnificado' in ret:
+            aut = ret['ajusteUnificado']
+            self.AnalizarAjuste(aut)
+
+    @inicializar_y_capturar_excepciones
+    def AjustarLiquidacionUnificadoPapel(self):
+        "Ajustar Liquidación realizada en un formulario F1116 B / C (papel)"
+        
+        # limpiar arrays no enviados:
+        if not self.ajuste['ajusteBase']['certificados']:
+            del self.ajuste['ajusteBase']['certificados']
+        for k1 in ('ajusteCredito', 'ajusteDebito'):
+            for k2 in ('retenciones', 'deducciones'):
+                if not self.ajuste[k1][k2]:
+                    del self.ajuste[k1][k2]
+        ret = self.client.liquidacionAjustarUnificadoPapel(
+                        auth={
+                            'token': self.Token, 'sign': self.Sign,
+                            'cuit': self.Cuit, },
+                        **self.ajuste
+                        )
+        ret = ret['ajustePapelReturn']
+        self.__analizar_errores(ret)
+        if 'ajustePapel' in ret:
+            aut = ret['ajustePapel']
+            self.AnalizarAjuste(aut)
+
+    @inicializar_y_capturar_excepciones
+    def AjustarLiquidacionContrato(self):
+        "Ajustar Liquidación activas relacionadas a un contrato"
+        
+        # limpiar arrays no enviados:
+        if not self.ajuste['ajusteBase']['certificados']:
+            del self.ajuste['ajusteBase']['certificados']
+        for k1 in ('ajusteCredito', 'ajusteDebito'):
+            for k2 in ('retenciones', 'deducciones'):
+                if not self.ajuste[k1][k2]:
+                    del self.ajuste[k1][k2]
+
+        ret = self.client.liquidacionAjustarContrato(
+                        auth={
+                            'token': self.Token, 'sign': self.Sign,
+                            'cuit': self.Cuit, },
+                        **self.ajuste
+                        )
+        ret = ret['ajusteContratoReturn']
+        self.__analizar_errores(ret)
+        if 'ajusteContrato' in ret:
+            aut = ret['ajusteContrato']
+            self.AnalizarAjuste(aut)
+    
+    def AnalizarAjuste(self, aut):
+        "Método interno para analizar la respuesta de AFIP (ajustes)"
+        
+        self.params_out['errores'] = self.errores
+            
+        # proceso la respuesta de autorizar, ajustar (y consultar):
+        if aut:
+            self.COE = str(aut['coe'])
+            self.COEAjustado = aut.get('coeAjustado')
+            self.NroContrato = aut.get('nroContrato')
+            self.Estado = aut['estado']
+
+            totunif = aut["totalesUnificados"]
+            self.Subtotal = totunif['subTotalGeneral']
+            self.TotalIva105 = totunif['iva105']
+            self.TotalIva21 = totunif['iva21']
+            self.TotalRetencionesGanancias = totunif['retencionesGanancias']
+            self.TotalRetencionesIVA = totunif['retencionesIVA']
+            self.TotalNetoAPagar = totunif['importeNeto']
+            self.TotalIvaRg2300_07 = totunif['ivaRG2300_2007']
+            self.TotalPagoSegunCondicion = totunif['pagoSCondicion']
+            
+            # actualizo parámetros de salida:
+            self.params_out['coe'] = self.COE
+            self.params_out['coe_ajustado'] = self.COE
+            self.params_out['estado'] = self.Estado
+            self.params_out['nro_orden'] = aut.get('nroOrden')
+            self.params_out['cod_tipo_operacion'] = aut.get('codTipoOperacion')
+            self.params_out['nro_contrato'] = aut.get('nroContrato')
+            self.params_out['subtotal'] = self.Subtotal
+            self.params_out['total_iva_10_5'] = self.TotalIva105
+            self.params_out['total_iva_21'] = self.TotalIva21
+            self.params_out['total_retenciones_ganancias'] = self.TotalRetencionesGanancias
+            self.params_out['total_retenciones_iva'] = self.TotalRetencionesIVA
+            self.params_out['total_neto_a_pagar'] = self.TotalNetoAPagar
+            self.params_out['total_iva_rg_2300_07'] = self.TotalIvaRg2300_07
+            self.params_out['total_pago_segun_condicion'] = self.TotalPagoSegunCondicion
+            
+            # almaceno los datos de ajustes crédito y débito para usarlos luego
+            self.__ajuste_debito = aut['ajusteDebito']
+            self.__ajuste_credito = aut['ajusteCredito']
+        else:
+            self.__ajuste_debito = None
+            self.__ajuste_credito = None
+
+    @inicializar_y_capturar_excepciones
+    def AnalizarAjusteDebito(self):
+        "Método para analizar la respuesta de AFIP para Ajuste Debito"
+        self.AnalizarLiquidacion(aut=self.__ajuste_debito, liq=self.__ajuste_debito)
+
+    @inicializar_y_capturar_excepciones
+    def AnalizarAjusteCredito(self):
+        "Método para analizar la respuesta de AFIP para Ajuste Credito"
+        self.AnalizarLiquidacion(aut=self.__ajuste_credito, liq=self.__ajuste_credito)
 
     @inicializar_y_capturar_excepciones
     def ConsultarLiquidacion(self, pto_emision=None, nro_orden=None, coe=None):
@@ -1304,6 +1609,12 @@ class WSLPG:
                 localidad = self.BuscarLocalidades(cod_prov, cod_localidad)
                 return localidad, provincia                
 
+            # divido los datos adicionales (debe haber renglones 1 al 9):
+            if liq.get('datos_adicionales') and f.has_key('datos_adicionales1'):
+                d = liq.get('datos_adicionales')
+                for i, ds in enumerate(f.split_multicell(d, 'datos_adicionales1')):
+                    liq['datos_adicionales%s' % (i + 1)] = ds
+                
             for copia in range(1, num_copias+1):
                 
                 # completo campos y hojas
@@ -1324,7 +1635,7 @@ class WSLPG:
                 # limpio datos del corredor si no corresponden:
                 if liq['actua_corredor'] == 'N':
                     if liq.get('cuit_corredor', None) == 0:
-                        del self.datos['cuit_corredor']
+                        del liq['cuit_corredor']
                     
                 # establezco campos según tabla encabezado:
                 for k,v in liq.items():
@@ -1478,6 +1789,8 @@ def escribir_archivo(dic, nombre_archivo, agrega=True):
                     ('Certificado', CERTIFICADO, dic.get('certificados', [])), 
                     ('Retencion', RETENCION, dic.get('retenciones', [])), 
                     ('Deduccion', DEDUCCION, dic.get('deducciones', [])),
+                    ('AjusteCredito', AJUSTE, dic.get('ajuste_credito', [])),
+                    ('AjusteDebito', AJUSTE, dic.get('ajuste_debito', [])),
                     ('Dato', DATO, dic.get('datos', [])),
                     ('Error', ERROR, dic.get('errores', [])),
                     ]
@@ -1497,6 +1810,24 @@ def escribir_archivo(dic, nombre_archivo, agrega=True):
             for it in dic['deducciones']:
                 it['tipo_reg'] = 3
                 archivo.write(escribir(it, DEDUCCION))
+        if 'ajuste_debito' in dic:
+            dic['ajuste_debito']['tipo_reg'] = 4
+            archivo.write(escribir(dic['ajuste_debito'], AJUSTE))
+            for it in dic['ajuste_debito'].get('retenciones', []):
+                it['tipo_reg'] = 2
+                archivo.write(escribir(it, RETENCION))
+            for it in dic['ajuste_debito'].get('deducciones', []):
+                it['tipo_reg'] = 3
+                archivo.write(escribir(it, DEDUCCION))
+        if 'ajuste_credito' in dic:
+            dic['ajuste_credito']['tipo_reg'] = 5
+            archivo.write(escribir(dic['ajuste_credito'], AJUSTE))
+            for it in dic['ajuste_credito'].get('retenciones', []):
+                it['tipo_reg'] = 2
+                archivo.write(escribir(it, RETENCION))
+            for it in dic['ajuste_credito'].get('deducciones', []):
+                it['tipo_reg'] = 3
+                archivo.write(escribir(it, DEDUCCION))
         if 'datos' in dic:
             for it in dic['datos']:
                 it['tipo_reg'] = 9
@@ -1512,30 +1843,49 @@ def leer_archivo(nombre_archivo):
     if '--json' in sys.argv:
         dic = json.load(archivo)
     elif '--dbf' in sys.argv:
-        dic = {'retenciones': [], 'deducciones': [], 'certificados': [], 'datos': []}
+        dic = {'retenciones': [], 'deducciones': [], 'certificados': [], 
+               'datos': [], 'ajuste_credito': [], 'ajuste_debito': [], }
         formatos = [('Encabezado', ENCABEZADO, dic), 
                     ('Certificado', CERTIFICADO, dic['certificados']), 
                     ('Retencio', RETENCION, dic['retenciones']), 
-                    ('Deduccion', DEDUCCION, dic['deducciones'])]
+                    ('Deduccion', DEDUCCION, dic['deducciones']),
+                    ('AjusteCredito', AJUSTE, dic['ajuste_credito']),
+                    ('AjusteDebito', AJUSTE, dic['ajuste_debito']),
+                    ]
         leer_dbf(formatos, conf_dbf)
     else:
-        dic = {'retenciones': [], 'deducciones': [], 'certificados': [], 'datos': []}
+        dic = {'retenciones': [], 'deducciones': [], 'certificados': [], 
+               'datos': [], 'ajuste_credito': {}, 'ajuste_debito': {}, }
         for linea in archivo:
             if str(linea[0])=='0':
-                dic.update(leer(linea, ENCABEZADO))
+                d = leer(linea, ENCABEZADO)
+                if d['reservado1']:
+                    print "ADVERTENCIA: USAR datos adicionales (nueva posición)" 
+                    d['datos_adicionales'] = d['reservado1'] 
+                dic.update(d)
+                # referenciar la liquidación para agregar ret. / ded.:
+                liq = dic
             elif str(linea[0])=='1':
-                dic['certificados'].append(leer(linea, CERTIFICADO))
+                liq['certificados'].append(leer(linea, CERTIFICADO))
             elif str(linea[0])=='2':
-                dic['retenciones'].append(leer(linea, RETENCION))
+                liq['retenciones'].append(leer(linea, RETENCION))
             elif str(linea[0])=='3':
                 d = leer(linea, DEDUCCION)
                 # ajustes por cambios en afip (compatibilidad hacia atras):
                 if d['reservado1']:
                     print "ADVERTENCIA: USAR precio_pkg_diario!" 
                     d['precio_pkg_diario'] = d['reservado1'] 
-                dic['deducciones'].append(d)
+                liq['deducciones'].append(d)
+            elif str(linea[0])=='4':
+                liq = leer(linea, AJUSTE)
+                liq.update({'retenciones': [], 'deducciones': [], 'datos': []})
+                dic['ajuste_debito'] = liq
+            elif str(linea[0])=='5':
+                liq = leer(linea, AJUSTE)
+                liq.update({'retenciones': [], 'deducciones': [], 'datos': []})
+                dic['ajuste_credito'] = liq
             elif str(linea[0])=='9':
-                dic['datos'].append(leer(linea, DATO))
+                liq['datos'].append(leer(linea, DATO))
             else:
                 print "Tipo de registro incorrecto:", linea[0]
     archivo.close()
@@ -1564,6 +1914,7 @@ if __name__ == '__main__':
                              ('Certificado', CERTIFICADO), 
                              ('Retencion', RETENCION), 
                              ('Deduccion', DEDUCCION), 
+                             ('Ajuste', AJUSTE),
                              ('Evento', EVENTO), ('Error', ERROR), 
                              ('Dato', DATO)]:
             comienzo = 1
@@ -1680,7 +2031,7 @@ if __name__ == '__main__':
         wslpg.Token = token
         wslpg.Sign = sign
         wslpg.Cuit = CUIT
-                
+
         if '--dummy' in sys.argv:
             ret = wslpg.Dummy()
             print "AppServerStatus", wslpg.AppServerStatus
@@ -1688,7 +2039,7 @@ if __name__ == '__main__':
             print "AuthServerStatus", wslpg.AuthServerStatus
             ##sys.exit(0)
 
-        if '--autorizar' in sys.argv or '--ajustar' in sys.argv:
+        if '--autorizar' in sys.argv:
         
             if '--prueba' in sys.argv:
                 pto_emision = 99
@@ -1717,7 +2068,8 @@ if __name__ == '__main__':
                     campania_ppal=1213,
                     cod_localidad_procedencia=5544,
                     cod_prov_procedencia=12,
-                    datos_adicionales="DATOS ADICIONALES",
+                    nro_contrato=0,
+                    datos_adicionales=("DATOS ADICIONALES 1234 " * 17) + ".",
                     ##peso_neto_sin_certificado=2000,
                     precio_operacion=None,  # para probar ajustar
                     total_peso_neto=1000,   # para probar ajustar
@@ -1816,6 +2168,9 @@ if __name__ == '__main__':
             else:
                 dic = leer_archivo(ENTRADA)
 
+            if not 'nro_orden' in dic:
+                raise RuntimeError("Archivo de entrada invalido, revise campos y lineas en blanco")
+                
             if int(dic['nro_orden']) == 0 and not '--testing' in sys.argv:
                 # consulto el último número de orden emitido:
                 ok = wslpg.ConsultarUltNroOrden(dic['pto_emision'])
@@ -1853,22 +2208,8 @@ if __name__ == '__main__':
                     wslpg.liquidacion['nroActComprador'],
                     wslpg.liquidacion['codTipoOperacion'], 
                     )
-        
-            if '--ajustar' in sys.argv:
-                print "Ajustando..."
-                i = sys.argv.index("--ajustar")
-                if i + 2 > len(sys.argv) or sys.argv[i + 1].startswith("--"):
-                    coe_ajustado = raw_input("Ingrese COE ajustado: ")
-                    cod_tipo_ajuste = raw_input("Ingrese Tipo Ajuste: ")
-                else:
-                    coe_ajustado = sys.argv[i + 1]
-                    cod_tipo_ajuste = sys.argv[i + 2]
-                ret = wslpg.AjustarLiquidacion(
-                                coe_ajustado=coe_ajustado,
-                                cod_tipo_ajuste=cod_tipo_ajuste,
-                                precio_operacion=dic['precio_operacion'],
-                                total_peso_neto=dic['total_peso_neto'])
-            else:
+            
+            if not '--dummy' in sys.argv:        
                 if '--recorrer' in sys.argv:
                     print "Consultando actividades y operaciones habilitadas..."
                     lista_act_op = wslpg.ConsultarTiposOperacion(sep=None)
@@ -1915,6 +2256,165 @@ if __name__ == '__main__':
             dic.update(wslpg.params_out)
             escribir_archivo(dic, SALIDA, agrega=('--agrega' in sys.argv))  
 
+        if '--ajustar' in sys.argv:
+            print "Ajustando..."
+            if '--prueba' in sys.argv:
+                # genero una liquidación de ejemplo:
+                dic = dict(
+                    pto_emision=55, nro_orden=0, coe_ajustado='330100013184',
+                    cod_localidad_procedencia=5544, cod_prov_procedencia=12,
+                    certificados=[dict(
+                       tipo_certificado_deposito=5,
+                       nro_certificado_deposito=555501200729,
+                       peso_neto=10000,
+                       cod_localidad_procedencia=3,
+                       cod_prov_procedencia=1,
+                       campania=1213,
+                       fecha_cierre='2013-01-13',
+                       peso_neto_total_certificado=10000,
+                       )],
+                    ajuste_credito=dict(
+                        diferencia_peso_neto=1000, diferencia_precio_operacion=100,
+                        cod_grado="G2", val_grado=1.0, factor=100,
+                        diferencia_precio_flete_tn=10,
+                        datos_adicionales='AJUSTE CRED UNIF',
+                        concepto_importe_iva_0='Alicuota Cero',
+                        importe_ajustar_Iva_0=900,
+                        concepto_importe_iva_105='Alicuota Diez',
+                        importe_ajustar_Iva_105=800,
+                        concepto_importe_iva_21='Alicuota Veintiuno',
+                        importe_ajustar_Iva_21=700,
+                        deducciones=[dict(codigo_concepto="AL",
+                               detalle_aclaratorio="Deduc Alm",
+                               dias_almacenaje="1",
+                               precio_pkg_diario=0.01,
+                               comision_gastos_adm=1.0,
+                               base_calculo=1000.0,
+                               alicuota=10.5, )],
+                        retenciones=[dict(codigo_concepto="RI",
+                               detalle_aclaratorio="Ret IVA",
+                               base_calculo=1000,
+                               alicuota=10.5, )], 
+                        ),
+                    ajuste_debito=dict(
+                        diferencia_peso_neto=500, diferencia_precio_operacion=100,
+                        cod_grado="G2", val_grado=1.0, factor=100,
+                        diferencia_precio_flete_tn=0.01,
+                        datos_adicionales='AJUSTE DEB UNIF',
+                        concepto_importe_iva_0='Alic 0',
+                        importe_ajustar_Iva_0=250,
+                        concepto_importe_iva_105='Alic 10.5',
+                        importe_ajustar_Iva_105=200,
+                        concepto_importe_iva_21='Alicuota 21',
+                        importe_ajustar_Iva_21=50,
+                        deducciones=[dict(codigo_concepto="AL",
+                               detalle_aclaratorio="Deduc Alm",
+                               dias_almacenaje="1",
+                               precio_pkg_diario=0.01,
+                               comision_gastos_adm=1.0,
+                               base_calculo=500.0,
+                               alicuota=10.5, )],
+                        retenciones=[dict(codigo_concepto="RI",
+                               detalle_aclaratorio="Ret IVA",
+                               base_calculo=100,
+                               alicuota=10.5, )],
+                        ),
+                    )
+                if '--contrato' in sys.argv:
+                    dic.update(
+                        {'nro_act_comprador': 40,
+                         'cod_grado_ent': 'G1',
+                         'cod_grano': 31,
+                         'cod_puerto': 14,
+                         'cuit_comprador': 20400000000,
+                         'cuit_corredor': 20267565393,
+                         'cuit_vendedor': 23000000019,
+                         'des_puerto_localidad': 'Desc Puerto',
+                         'nro_contrato': 26,
+                         'precio_flete_tn': 1000,
+                         'precio_ref_tn': 1000,
+                         'val_grado_ent': 1.01})
+                escribir_archivo(dic, ENTRADA)
+            
+            dic = leer_archivo(ENTRADA)
+            
+            if not 'nro_orden' in dic:
+                raise RuntimeError("Archivo de entrada invalido, revise campos y lineas en blanco")
+                
+            if int(dic['nro_orden']) == 0 and not '--testing' in sys.argv:
+                # consulto el último número de orden emitido:
+                ok = wslpg.ConsultarUltNroOrden(dic['pto_emision'])
+                if ok:
+                    dic['nro_orden'] = wslpg.NroOrden + 1
+            
+            if '--contrato' in sys.argv:
+                for k in ("nro_contrato", "nro_act_comprador", "cod_grano", 
+                          "cuit_vendedor", "cuit_comprador", "cuit_corredor", 
+                          "precio_ref_tn", "cod_grado_ent", "val_grado_ent", 
+                          "precio_flete_tn", "cod_puerto", 
+                          "des_puerto_localidad"):
+                    v = dic.get(k)
+                    if v:
+                        wslpg.SetParametro(k, v)
+                        
+            wslpg.CrearAjusteBase(pto_emision=dic['pto_emision'], 
+                              nro_orden=dic['nro_orden'], 
+                              coe_ajustado=dic['coe_ajustado'],
+                              cod_localidad=dic['cod_localidad_procedencia'],
+                              cod_provincia=dic['cod_prov_procedencia'],
+                              )
+            
+            for cert in dic.get('certificados', []):
+                if cert:
+                    wslpg.AgregarCertificado(**cert)
+
+            liq = dic['ajuste_credito']
+            wslpg.CrearAjusteCredito(**liq)
+            for ded in liq.get('deducciones', []):
+                wslpg.AgregarDeduccion(**ded)
+            for ret in liq.get('retenciones', []):
+                wslpg.AgregarRetencion(**ret)
+            
+            liq = dic['ajuste_debito']
+            wslpg.CrearAjusteDebito(**liq)
+            for ded in liq.get('deducciones', []):
+                wslpg.AgregarDeduccion(**ded)
+            for ret in liq.get('retenciones', []):
+                wslpg.AgregarRetencion(**ret)
+            
+            if '--testing' in sys.argv:
+                wslpg.LoadTestXML("tests/wslpg_ajuste_unificado.xml")
+
+            if '--contrato' in sys.argv:
+                ret = wslpg.AjustarLiquidacionContrato()
+            else:
+                ret = wslpg.AjustarLiquidacionUnificado()
+            
+            if wslpg.Excepcion:
+                print >> sys.stderr, "EXCEPCION:", wslpg.Excepcion
+                if DEBUG: print >> sys.stderr, wslpg.Traceback
+            print "Errores:", wslpg.Errores
+            print "COE", wslpg.COE
+            print "Subtotal", wslpg.Subtotal
+            print "TotalIva105", wslpg.TotalIva105
+            print "TotalIva21", wslpg.TotalIva21
+            print "TotalRetencionesGanancias", wslpg.TotalRetencionesGanancias
+            print "TotalRetencionesIVA", wslpg.TotalRetencionesIVA
+            print "TotalNetoAPagar", wslpg.TotalNetoAPagar
+            print "TotalIvaRg2300_07", wslpg.TotalIvaRg2300_07
+            print "TotalPagoSegunCondicion", wslpg.TotalPagoSegunCondicion
+            
+            # actualizo el archivo de salida con los datos devueltos
+            dic.update(wslpg.params_out)            
+            ok = wslpg.AnalizarAjusteCredito()
+            dic['ajuste_credito'].update(wslpg.params_out)
+            ok = wslpg.AnalizarAjusteDebito()
+            dic['ajuste_debito'].update(wslpg.params_out)
+            escribir_archivo(dic, SALIDA, agrega=('--agrega' in sys.argv))  
+
+            if DEBUG: 
+                pprint.pprint(dic)
+            
         if '--anular' in sys.argv:
             ##print wslpg.client.help("anularLiquidacion")
             try:
@@ -2069,7 +2569,7 @@ if __name__ == '__main__':
                 wslpg.AgregarDatoPDF(k, v)
 
             # datos adicionales (tipo de registro 9):
-            for dato in liq['datos']:
+            for dato in liq.get('datos', []):
                 wslpg.AgregarDatoPDF(dato['campo'], dato['valor'])
                 if DEBUG: print "DATO", dato['campo'], dato['valor']
 
